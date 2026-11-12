@@ -56,6 +56,7 @@ def main():
             # 获取最新帧
             rgb_image, host_ts_ns = cam.get_latest_frame(timeout=0.01)
 
+
             # 绘制与显示
             if rgb_image is not None:
                 # FPS 统计（满 1 秒才返回 current_fps，否则为 None）
@@ -68,6 +69,7 @@ def main():
                 bgr_image = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR)
 
                 cv2.imshow("Camera Stream", bgr_image)
+
 
             # 处理退出
             key = cv2.waitKey(1) & 0xFF
