@@ -220,18 +220,26 @@ class CameraStreamer(threading.Thread):
         """通知后台线程停止"""
         self.running.clear()
 
+
+        
     @staticmethod
     def get_camera_calibration_from_file(dump_path, camera_id=0):
         """从 dumpsys media.camera 导出文本中解析相机标定参数。
 
         返回 dict: K / raw_intrinsic / pose_rotation / pose_translation / active_array，
         失败返回 None。自动识别 UTF-8 / UTF-16 LE / UTF-16 BE（兼容 PowerShell 重定向）。
+        包含主点异常检测与自动矫正逻辑。
         """
         device_id = _PUBLIC_TO_DEVICE.get(camera_id, camera_id)
 
         # ---- 读文件：二进制 + BOM 检测 ----
-        with open(dump_path, "rb") as f:
-            raw = f.read()
+        try:
+            with open(dump_path, "rb") as f:
+                raw = f.read()
+        except FileNotFoundError:
+            print(f"[CAL] 找不到文件: {dump_path}")
+            return None
+
         if raw.startswith(b"\xff\xfe"):
             content = raw[2:].decode("utf-16-le", errors="ignore")
         elif raw.startswith(b"\xfe\xff"):
@@ -299,6 +307,26 @@ class CameraStreamer(threading.Thread):
                     [0, fy, cy],
                     [0, 0, 1]], dtype=np.float64)
 
+        # ================= 主点异常检测与自动矫正 =================
+        if active is not None:
+            W_ref, H_ref = active
+            cx_ideal = W_ref / 2.0
+            cy_ideal = H_ref / 2.0
+            
+            # 设定容忍阈值：主点偏离中心超过画幅宽/高的 10% 视为异常
+            tol_x = W_ref * 0.1
+            tol_y = H_ref * 0.1
+            
+            if abs(cx - cx_ideal) > tol_x or abs(cy - cy_ideal) > tol_y:
+                print(f"[CAL] ⚠️ 警告: Camera {camera_id} (Device {device_id}) 内参主点异常！")
+                print(f"[CAL] 原始主点: ({cx:.2f}, {cy:.2f})，理论中心: ({cx_ideal:.2f}, {cy_ideal:.2f})")
+                print(f"[CAL] 自动矫正: 强制将主点修正至物理图像中心。")
+                K[0, 2] = cx_ideal
+                K[1, 2] = cy_ideal
+        else:
+            print(f"[CAL] 提示: 无法获取 active_array，跳过主点自动校验。")
+        # ==========================================================
+
         return {
             "K": K,
             "raw_intrinsic": intr,
@@ -307,7 +335,7 @@ class CameraStreamer(threading.Thread):
             "active_array": active,
         }
 
-
+    
     @staticmethod
     def scale_intrinsics(K, ref_size, new_size):
         """按比例缩放 K。前提：new_size 与 ref_size 宽高比一致（纯缩放，无裁剪）。
