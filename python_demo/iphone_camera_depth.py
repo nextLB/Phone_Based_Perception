@@ -41,9 +41,6 @@ def main():
         print("文件里未解析到内参，需 OpenCV 标定")
 
 
-
-
-
     fps_frame_count = 0
     fps_start_time = time.time()
     current_fps = None
@@ -52,7 +49,6 @@ def main():
     print("-" * 60)
     cv2.namedWindow("Camera Stream", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("Camera Stream", RESIZE_WIDTH, RESIZE_HEIGHT)
-
 
 
     try:
@@ -75,6 +71,13 @@ def main():
                 cv2.imshow("Camera Stream", bgr_image)
 
 
+                # TODO: 后续可能会做深度图推理估计等
+
+
+
+
+
+
             # 处理退出
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
@@ -90,8 +93,6 @@ def main():
         cam.stop()
         cv2.destroyAllWindows()
         print("清理完毕，程序退出。")
-
-
 
 
 
