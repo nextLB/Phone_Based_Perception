@@ -15,6 +15,9 @@ RESIZE_WIDTH = 1280
 RESIZE_HEIGHT = 960
 
 
+
+
+
 def main():
 
     # Camera
@@ -49,6 +52,7 @@ def main():
     print("-" * 60)
     cv2.namedWindow("Camera Stream", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("Camera Stream", RESIZE_WIDTH, RESIZE_HEIGHT)
+
 
 
     try:
