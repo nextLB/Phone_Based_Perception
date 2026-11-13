@@ -5,6 +5,7 @@ import json
 import cv2
 import numpy as np
 from camera_sensor_streamer import CameraStreamer
+from sensor_streamer import SensorStreamer
 
 # ============================== 配置 ==============================
 CAMERA_ID = 0
@@ -13,14 +14,16 @@ CAMERA_MAX_FPS = 30
 CAMERA_BITRATE = 20000000
 CALIB_FILE = "oppo_reno14_pro_media_camera.txt"
 
-WARMUP_SECONDS = 5.0               # 预热时间（让相机自动曝光/对焦稳定）
-CAPTURE_COUNT = 100                # 采集张数（不用太多，几十张就够做两视图/多视图）
-CAPTURE_INTERVAL = 0.2             # 采集间隔（秒），期间请缓慢平移手机
-CAPTURE_TIMEOUT = 300.0            # 超时保护
+PHONE_IP = "192.168.1.145"         # 与 main.py 一致
 
-# ★ 输出到一个新文件夹，避免和旧数据混淆
-OUTPUT_DIR = "D:/LB/Datasets/iphone_capture"      
+WARMUP_SECONDS = 5.0
+CAPTURE_COUNT = 500
+CAPTURE_INTERVAL = 0.1
+CAPTURE_TIMEOUT = 300.0
+
+OUTPUT_DIR = "D:/LB/Datasets/iphone_capture"
 FRAME_EXT = "png"
+FRAME_META_FILE = "frames.jsonl"   # ★ 新增：每帧图像 + IMU 快照
 
 # ============================== 工具 ==============================
 def parse_size(size_str):
@@ -35,6 +38,11 @@ def put_lines(img, lines, color=(0, 255, 0)):
         y += 32
     return img
 
+def fmt_vec(v):
+    if v is None:
+        return "None"
+    return f"[{v[0]:7.3f}, {v[1]:7.3f}, {v[2]:7.3f}]"
+
 # ============================== 主流程 ==============================
 def main():
     cap_w, cap_h = parse_size(CAMERA_SIZE)
@@ -44,9 +52,23 @@ def main():
     img_dir = os.path.join(OUTPUT_DIR, "images")
     os.makedirs(img_dir, exist_ok=True)
 
+    frames_log_path = os.path.join(OUTPUT_DIR, FRAME_META_FILE)
+    # 清空旧的 frames.jsonl，避免多轮采集混在一起
+    with open(frames_log_path, "w", encoding="utf-8") as f:
+        pass
+
     # -------- 1. 启动相机 --------
     cam = CameraStreamer(camera_id=CAMERA_ID, camera_size=CAMERA_SIZE, max_fps=CAMERA_MAX_FPS, bitrate=CAMERA_BITRATE)
     cam.start()
+
+    # -------- 1.5 启动传感器（新增） --------
+    print("[SENSOR] 启动 IMU 传感器...")
+    acc_sensor  = SensorStreamer("android.sensor.accelerometer",   phone_ip=PHONE_IP)
+    gyro_sensor = SensorStreamer("android.sensor.gyroscope",       phone_ip=PHONE_IP)
+    mag_sensor  = SensorStreamer("android.sensor.magnetic_field",  phone_ip=PHONE_IP)
+    acc_sensor.start()
+    gyro_sensor.start()
+    mag_sensor.start()
 
     # -------- 2. 解析内参（源头已自动纠偏） --------
     cal = CameraStreamer.get_camera_calibration_from_file(CALIB_FILE, camera_id=CAMERA_ID)
@@ -67,11 +89,27 @@ def main():
     saved = 0
     captured_info = []
 
+    # ★ 传感器最新值缓存（每轮循环都尝试刷新，保存帧时直接取用）
+    latest_acc = None
+    latest_gyro = None
+    latest_mag = None
+
+    def refresh_sensors():
+        """每轮循环调用，保持 latest_* 是最新值。"""
+        nonlocal latest_acc, latest_gyro, latest_mag
+        a, _, _ = acc_sensor.get_latest_data(timeout=0.0)
+        g, _, _ = gyro_sensor.get_latest_data(timeout=0.0)
+        m, _, _ = mag_sensor.get_latest_data(timeout=0.0)
+        if a is not None: latest_acc = a
+        if g is not None: latest_gyro = g
+        if m is not None: latest_mag = m
+
     try:
         # ==================== 3. 预热 ====================
         print("[INFO] 等待相机首帧...")
         first_frame_time = None
         while first_frame_time is None:
+            refresh_sensors()
             frame, _ = cam.get_latest_frame(timeout=0.1)
             if frame is not None:
                 first_frame_time = time.time()
@@ -79,6 +117,7 @@ def main():
             if (cv2.waitKey(1) & 0xFF) == ord('q'): return
 
         while True:
+            refresh_sensors()
             left = WARMUP_SECONDS - (time.time() - first_frame_time)
             if left <= 0: break
             frame, _ = cam.get_latest_frame(timeout=0.05)
@@ -96,7 +135,9 @@ def main():
         while saved < CAPTURE_COUNT:
             if time.time() - start_capture > CAPTURE_TIMEOUT: break
 
+            refresh_sensors()                       # 先刷新传感器
             frame, ts = cam.get_latest_frame(timeout=0.05)
+
             if frame is not None:
                 now = time.time()
                 bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
@@ -106,12 +147,37 @@ def main():
                     fname = f"frame_{saved:04d}.{FRAME_EXT}"
                     fpath = os.path.join(img_dir, fname)
                     cv2.imwrite(fpath, bgr)
+
+                    # ★ 组装一帧的完整记录
+                    record = {
+                        "frame": fname,
+                        "frame_index": saved,
+                        "cam_ts_ns":  int(ts) if ts is not None else None,   # 相机帧时间戳
+                        "host_ts_ns": int(now * 1e9),                        # 保存时刻 host 时间
+                        "acc":  [float(x) for x in latest_acc]  if latest_acc  is not None else None,
+                        "gyro": [float(x) for x in latest_gyro] if latest_gyro is not None else None,
+                        "mag":  [float(x) for x in latest_mag]  if latest_mag  is not None else None,
+                    }
+                    with open(frames_log_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
                     saved += 1
-                    captured_info.append({"file": fname, "timestamp_ns": int(ts) if ts is not None else None})
-                    print(f"[{saved}/{CAPTURE_COUNT}] saved {fname}")
+                    captured_info.append({
+                        "file": fname,
+                        "frame_index": saved - 1,
+                        "timestamp_ns": int(ts) if ts is not None else None,
+                    })
+                    print(f"[{saved}/{CAPTURE_COUNT}] saved {fname}  "
+                          f"ACC={fmt_vec(latest_acc)} GYRO={fmt_vec(latest_gyro)} MAG={fmt_vec(latest_mag)}")
                     cv2.setWindowTitle(win_name, f"Capture | {saved}/{CAPTURE_COUNT}")
 
-                put_lines(bgr, [f"Captured: {saved}/{CAPTURE_COUNT}", f"Interval: {CAPTURE_INTERVAL}s"])
+                put_lines(bgr, [
+                    f"Captured: {saved}/{CAPTURE_COUNT}",
+                    f"Interval: {CAPTURE_INTERVAL}s",
+                    f"ACC : {fmt_vec(latest_acc)}",
+                    f"GYRO: {fmt_vec(latest_gyro)}",
+                    f"MAG : {fmt_vec(latest_mag)}",
+                ])
                 cv2.imshow(win_name, bgr)
 
             if (cv2.waitKey(1) & 0xFF) == ord('q'): break
@@ -133,6 +199,7 @@ def main():
             "pose_translation": cal["pose_translation"] if cal else None,
             "captured_count": saved,
             "captures": captured_info,
+            "frame_meta_file": FRAME_META_FILE,      # ★ 指向 frames.jsonl
         }
         intr_path = os.path.join(OUTPUT_DIR, "intrinsics.json")
         with open(intr_path, "w", encoding="utf-8") as f:
@@ -148,12 +215,16 @@ def main():
             fs.release()
 
         print(f"[DONE] 共采集 {saved} 张 → {img_dir}")
+        print(f"[DONE] 帧+IMU 元数据 → {frames_log_path}")
         print(f"[DONE] 内参文件 → {intr_path}")
 
     except KeyboardInterrupt:
         print("\n[INFO] Ctrl-C 中断")
     finally:
         cam.stop()
+        acc_sensor.stop()
+        gyro_sensor.stop()
+        mag_sensor.stop()
         time.sleep(0.1)
         cv2.destroyAllWindows()
         print("[DONE] 程序退出")
